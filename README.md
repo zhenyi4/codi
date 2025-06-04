@@ -37,6 +37,7 @@ To probe and visualize latent thoughts on GSM8K, run:
 ```
 bash script/probe_latent_token.sh
 ```
+The output file will be saved in outputs/.
 
 ## Training
 **GSM8k-Aug**
