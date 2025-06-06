@@ -33,7 +33,7 @@ python train.py \
 	--use_prj True \
 	--prj_dim 768 \
 	--prj_dropout 0.0 \
-	--mse_loss_div_std True \
+	--distill_loss_div_std True \
 	--exp_mode False \
 	--exp_data_num 200 \
 	--remove_eos True \
