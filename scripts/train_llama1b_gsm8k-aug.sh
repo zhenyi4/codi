@@ -34,10 +34,10 @@ python train.py \
 	--use_prj True \
 	--prj_dim 2048 \
 	--prj_dropout 0.0 \
-	--mse_loss_div_std True \
+	--distill_loss_div_std True \
 	--exp_mode False \
 	--exp_data_num 200 \
 	--remove_eos True \
-	--mse_loss_factor 20 \
+	--distill_loss_factor 20 \
 	--print_ref_model_stats True \
 	--max_token_num 200
