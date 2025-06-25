@@ -17,7 +17,7 @@ python train.py \
   	--gradient_accumulation_steps 4 \
 	--bf16 \
 	--num_train_epochs 10 \
-	--learning_rate 8e-5 \
+	--learning_rate 8e-4 \
 	--max_grad_norm 2.0 \
 	--use_lora True \
 	--lora_r 128 --lora_alpha 32 --lora_init \
