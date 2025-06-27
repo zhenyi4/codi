@@ -1,16 +1,10 @@
 # CODI
 
-This is the official implementation of the paper: [CODI: Compressing Chain-of-Thought into Continuous Space via Self-Distillation](https://arxiv.org/abs/2502.21074)
+This is the official implementation of the paper: CODI: Compressing Chain-of-Thought into Continuous Space via Self-Distillation
 
 ![codi](imgs/codi_method_v4.png)
 
 ## Setup
-
-**Clone the Repository**:
-```
-git clone git@github.com:zhenyi4/CODI.git
-cd CODI
-```
 
 **Environment Setup**:
 ```
@@ -21,9 +15,6 @@ pip install -r requirements.txt
 
 ## Running the Results
 
-Pretrained model weights are available at https://huggingface.co/zen-E, including:
-* zen-E/CODI-gpt2
-* zen-E/CODI-llama3.2-1b-Instruct
  
 To evaluate accuracy on GSM8K, run:
 ```
@@ -81,13 +72,3 @@ You can change the testing script's data_name to "commonsense" for evaluation.
 
 * max_token_num: Discards training samples that exceed this token length threshold.
 
-## Citation
-If you use this code base in your research, please cite our paper with the following BibTex entry:
-```bibtex
-@article{shen2025codi,
-      title={CODI: Compressing Chain-of-Thought into Continuous Space via Self-Distillation}, 
-      author={Zhenyi Shen and Hanqi Yan and Linhai Zhang and Zhanghao Hu and Yali Du and Yulan He},
-      year={2025},
-      journal={arXiv preprint arxiv:2502.21074},
-}
-```
