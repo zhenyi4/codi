@@ -1,5 +1,5 @@
 python test.py \
-	--data_name "gsm-hard" \
+	--data_name "gsm8k" \
 	--output_dir "$SAVE_DIR" \
 	--model_name_or_path meta-llama/Llama-3.2-1B-Instruct \
 	--seed 11 \
