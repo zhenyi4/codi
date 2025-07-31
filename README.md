@@ -57,29 +57,29 @@ bash train_gpt2_commonsense.sh # or train_llama_commonsense.sh
 You can change the testing script's data_name to "commonsense" for evaluation.
 
 ## Key Arguments
-* use_prj: Whether use a projection layer for the last layer hidden state.
+* `use_prj`: Whether use a projection layer for the last layer hidden state.
 
-* prj_dim: The dimension of the hidden state of the projection layer.
+* `prj_dim`: The dimension of the hidden state of the projection layer.
 
-* prj_no_ln: Whether the projection layer is not followed by a LayerNorm layer.
+* `prj_no_ln`: Whether the projection layer is not followed by a LayerNorm layer.
 
-* distill_loss_div_std: Whether divide the distillation loss via the standard deviation of the teacher's hidden states.
+* `distill_loss_div_std`: Whether divide the distillation loss via the standard deviation of the teacher's hidden states.
 
-* distill_loss_type: The type of loss used for distillation (e.g. l1, l2, smoothl1).
+* `distill_loss_type`: The type of loss used for distillation (e.g. l1, l2, smoothl1).
 
-* distill_loss_factor: The multiplier that scales the distillation loss in the total loss calculation.
+* `distill_loss_factor`: The multiplier that scales the distillation loss in the total loss calculation.
 
-* ref_loss_factor: The multiplier that scales the teacher's cross entropy loss in the total loss calculation.
+* `ref_loss_factor`: The multiplier that scales the teacher's cross entropy loss in the total loss calculation.
 
-* num_latent: The number of latent thoughts used for training.
+* `num_latent`: The number of latent thoughts used for training.
 
-* inf_latent_iterations: The number of latent thoughts used for inference.
+* `inf_latent_iterations`: The number of latent thoughts used for inference.
 
-* include_last_cot: Include the last CoT step in the training data.
+* `include_last_cot`: Include the last CoT step in the training data.
 
-* fix_attn_mask: Flag to fix a known attention mask bug (leave as False by default).
+* `fix_attn_mask`: Flag to fix a known attention mask bug (leave as False by default).
 
-* max_token_num: Discards training samples that exceed this token length threshold.
+* `max_token_num`: Discards training samples that exceed this token length threshold.
 
 ## Citation
 If you use this code base in your research, please cite our paper with the following BibTex entry:
