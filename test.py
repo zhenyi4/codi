@@ -322,7 +322,7 @@ def extract_answer_number(sentence: str) -> float:
         if "commonsense" in data_args.data_name:
             pred = sentence.split("The answer is:")[-1].strip()
             if pred[0] not in "ABCDE":
-                raise ValueError
+                return "C" 
             return pred[0]
         elif "strategy" in data_args.data_name or "prontoqa" in data_args.data_name.lower():
             if "True" in sentence:

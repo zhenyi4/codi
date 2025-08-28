@@ -235,7 +235,7 @@ def train():
                 question = f"{example['question']}"
                 if "icot" in self.data_name and "full" in self.data_name: # icot-full (GSM8k-Aug-NL)
                     # bad data
-                    if example["answer"] is None or example["response"] is None:
+                    if example["answer"] is None: # or example["response"] is None:
                         continue
                     
                     # avoid OOM: remove very long data
@@ -246,10 +246,19 @@ def train():
                     cot = f"{example['cot']}".split(". ")
                     if not (training_args.include_last_cot):
                         cot = cot[:-1]
-                    answer = f"The answer is: {example['answer'].split(' ')[-1]}"
+
+                    answer = example['answer'].split(' ')[-1]
+                    if not answer[0].isdigit():
+                        continue
+                    answer = f"The answer is: {answer}"
                     answer = answer.replace("####", "")
                     questions.append(question)
-                    cots.append(". ".join(cot)+".\n")
+                    
+                    if cot:
+                        cot = ". ".join(cot)+".\n"
+                    else:
+                        cot = ""
+                    cots.append(cot)
                     answers.append(answer)
                 elif "icot" in self.data_name: # icot (GSM8k-Aug)
                     # avoid OOM: remove very long data
@@ -356,7 +365,10 @@ def train():
         """Make dataset and collator for supervised fine-tuning."""
         logging.warning("Downloading Data")
         if "icot" in data_args.data_name:
-            dataset = load_dataset("zen-E/GSM8k-Aug")["train"]
+            if 'full' in data_args.data_name:
+                dataset = load_dataset("zen-E/GSM8k-Aug-NL")["train"]
+            else:
+                dataset = load_dataset("zen-E/GSM8k-Aug")["train"]
             train_dataset = SupervisedDataset(data_name=data_args.data_name, raw_data=dataset, tokenizer=tokenizer, bot=model.bot_id, eot=model.eot_id)
             data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
             return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
