@@ -9,6 +9,7 @@ python test.py \
 	--batch_size 128 \
 	--greedy True \
 	--num_latent 6 \
+    --depth_recurrent True \
 	--use_prj True \
 	--prj_dim 768 \
 	--prj_no_ln False \

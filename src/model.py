@@ -18,6 +18,7 @@ from safetensors.torch import load_file
 from transformers.modeling_outputs import ModelOutput
 import random
 import copy
+from src.depth_recurrent import build_depth_backend
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -97,8 +98,8 @@ class TrainingArguments(transformers.TrainingArguments):
     use_lora: bool = field(default=True, metadata={"help": "Use lora or not."})
     greedy: bool = field(default=False, metadata={"help": "Greedy decoding during inference."})
     exp_mode: bool = field(default=False, metadata={"help": "Use partial number of data. for debugging."})
-    exp_data_num: int = field(default=10000, metadata={"help": "The number of data used in exp mode"}) 
-    use_prj: bool = field(default=False, metadata={"help": "Use a prj module after the llm for latent generation."}) 
+    exp_data_num: int = field(default=10000, metadata={"help": "The number of data used in exp mode"})
+    use_prj: bool = field(default=False, metadata={"help": "Use a prj module after the llm for latent generation."})
     prj_dim: int = field(default=2048, metadata={"help": "The hidden dim of the projection module."})
     prj_dropout: float = field(default=0.0, metadata={"help": "Dropout ratio of the projection module."})
     prj_no_ln: bool = field(default=False, metadata={"help": "Remove the Layer Norm layer for the projection module."})
@@ -115,6 +116,10 @@ class TrainingArguments(transformers.TrainingArguments):
     log_full: bool = field(default=False, metadata={"help": "Log all losses."})
     print_loss: bool = field(default=True)
     max_token_num: int = field(default=1000, metadata={"help": "Limit the longest data to avoid OOM."})
+    depth_recurrent: bool = field(default=False, metadata={"help": "Use the depth-recurrent (looped middle-block) thinking stage instead of the autoregressive latent loop. GPT-2 only (phase 1)."})
+    num_prelude: int = field(default=1, metadata={"help": "Number of leading blocks run once before the recurrent core (depth_recurrent)."})
+    num_coda: int = field(default=1, metadata={"help": "Number of trailing blocks run once after the recurrent core (depth_recurrent)."})
+    core_bptt_window: int = field(default=-1, metadata={"help": "If >0, only backprop through the last N core iterations (depth_recurrent). -1 means full BPTT."})
 
 def print_trainable_parameters(model):
     trainable_parameters = 0
@@ -141,7 +146,7 @@ class CODI(torch.nn.Module):
         self.model_args = model_args
         self.training_args = training_args
         self.model_name = model_args.model_name_or_path
-        model_wrapper_class = AutoModelForCausalLM 
+        model_wrapper_class = AutoModelForCausalLM
         if model_args.full_precision:
             self.codi = model_wrapper_class.from_pretrained(
                     self.model_name,
@@ -198,14 +203,14 @@ class CODI(torch.nn.Module):
             )
             if not self.prj_no_ln:
                 self.prj.add_module("ln", nn.LayerNorm(self.dim))
-                
+
         # Losses
         self.print_loss = training_args.print_loss
         self.ref_loss_factor = training_args.ref_loss_factor
 
         # Cross Entropy Loss
-        self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100) 
-        
+        self.loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+
         # Distillation Loss
         self.distill_loss_div_std = training_args.distill_loss_div_std
         self.distill_loss_type = training_args.distill_loss_type
@@ -217,8 +222,15 @@ class CODI(torch.nn.Module):
         else:
             raise NotImplementedError
 
-        # general 
+        # general
         self.fix_attn_mask = training_args.fix_attn_mask
+
+        # Depth-recurrent ("looped middle-block") thinking stage (phase 1: GPT-2 only).
+        self.depth_recurrent = training_args.depth_recurrent
+        self.num_prelude = training_args.num_prelude
+        self.num_coda = training_args.num_coda
+        self.core_bptt_window = training_args.core_bptt_window
+        self._depth_backend = None  # built lazily on first use
 
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
@@ -245,6 +257,18 @@ class CODI(torch.nn.Module):
             if "pythia" in model_name:
                 return model.gpt_neox.embed_in
             raise NotImplementedError
+
+    def get_base_model(self):
+        # Reach the underlying HF model through the PEFT wrapper (mirror get_embd).
+        try:
+            return self.codi.get_base_model()
+        except AttributeError:  # not LoRA-wrapped
+            return self.codi
+
+    def depth_backend(self):
+        if self._depth_backend is None:
+            self._depth_backend = build_depth_backend(self.get_base_model(), self.model_name)
+        return self._depth_backend
 
     def init(self):
         print_trainable_parameters(self)
@@ -275,7 +299,7 @@ class CODI(torch.nn.Module):
     ):
         if not self.fix_attn_mask:
             ref_attention_mask = None
-        
+
         # Encode the question
         past_key_values = None
         outputs = self.codi(input_ids=encoder_input_ids, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=encoder_attention_mask)
@@ -287,7 +311,9 @@ class CODI(torch.nn.Module):
         len_pred_loss = 0
         dynamic_mask = None
         if self.fix_attn_mask:
-            dynamic_mask = torch.ones((encoder_attention_mask.size(0), self.num_latent), device=ref_labels.device)
+            # Depth-recurrent appends ONE thought slot; baseline appends num_latent.
+            num_thought_slots = 1 if self.depth_recurrent else self.num_latent
+            dynamic_mask = torch.ones((encoder_attention_mask.size(0), num_thought_slots), device=ref_labels.device)
 
         # Iterate over the latent embeddings
         distill_loss_total = 0
@@ -295,18 +321,18 @@ class CODI(torch.nn.Module):
 
         with torch.no_grad():
             ref_outputs = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask)
-        ref_outputs_with_grad = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask) 
-        
+        ref_outputs_with_grad = self.codi(input_ids=ref_input_ids, output_hidden_states=True, attention_mask=ref_attention_mask)
+
         # Formatting for deprecated exps
-        ref_outputs_list = [ref_outputs] 
-        ref_input_ids = [ref_input_ids] 
+        ref_outputs_list = [ref_outputs]
+        ref_input_ids = [ref_input_ids]
 
         # Process the position tensor
-        # Normalise the position definition 
-        if "llama" in self.model_name.lower() or "qwen" in self.model_name.lower(): # there is one more token standing for " " 
+        # Normalise the position definition
+        if "llama" in self.model_name.lower() or "qwen" in self.model_name.lower(): # there is one more token standing for " "
             model_answer_position = model_answer_position + 1
             ref_answer_position = ref_answer_position + 1
-       
+
         # For DEBUG: Print the probability of the teacher task to predict the correct answer
         if self.training_args.print_ref_model_stats:
             for i, (ref_inputs, ref_outputs) in enumerate(zip(ref_input_ids, ref_outputs_list)):
@@ -322,13 +348,30 @@ class CODI(torch.nn.Module):
                 probe_positions = ref_inputs.gather(1, probe_positions_positions).unsqueeze(1)
                 ref_probs_of_target = ref_probs_at_positions.gather(2, probe_positions)
                 print(f'stage{i}: mean of the prob of the target token: {ref_probs_of_target.mean()}')
-        
+
         # the model answer position is the position of the eot token to predict the first token of the response
         model_answer_position = model_answer_position - 1
         ref_answer_position = ref_answer_position -1
-      
+
         num_latent = self.num_latent
-        if self.num_latent != 0:
+
+        # ===== Thinking stage =====
+        # Produces `past_key_values` (the cache consumed by the UNCHANGED answer
+        # decode below). Baseline: autoregressive latent loop appending num_latent
+        # tokens. Depth-recurrent: looped middle-block recurrence appending ONE slot.
+        run_answer_decode = False
+        if self.depth_recurrent:
+            past_key_values = self.depth_backend().think(
+                seed=latent_embd,
+                question_past=past_key_values,
+                encoder_attention_mask=encoder_attention_mask,
+                num_iterations=num_latent,
+                num_prelude=self.num_prelude,
+                num_coda=self.num_coda,
+                core_bptt_window=self.core_bptt_window,
+            )
+            run_answer_decode = True
+        elif self.num_latent != 0:
             for i in range(num_latent):
                 # Implicit CoT generation
                 outputs = self.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
@@ -336,50 +379,50 @@ class CODI(torch.nn.Module):
                 latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
                 if self.use_prj:
                     latent_embd = self.prj(latent_embd)
+            run_answer_decode = True
 
-                # Calculate the distillation loss
-                if i == num_latent - 1: # the last latent embedding
-                    # Decode the final answer in natural language
-                    embds = self.get_embd(self.codi, self.model_name)(decoder_input_ids)
-                  
-                    if dynamic_mask is not None: # Prevent attending the paddings
-                        decoder_mask = torch.ones((embds.size(0), embds.size(1)), dtype=torch.bool).to(dynamic_mask)
-                        dynamic_mask = torch.cat((encoder_attention_mask, dynamic_mask, decoder_mask), dim=1)
-                        dynamic_mask = dynamic_mask.bool()
-                    # Student task's output
-                    outputs = self.codi(inputs_embeds=embds, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=dynamic_mask) 
-                    # Teacher task's output
-                    ref_outputs = ref_outputs_list[0]
-                    
-                    distill_loss = 0
-                    # Calculate distillation loss between the teacher's logits and the student's logits for every layer
-                    for j, (out, ref_out) in enumerate(zip(outputs.hidden_states, ref_outputs.hidden_states)):
-                        ref_selected = ref_out.gather(1, ref_answer_position.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, ref_out.size(-1)))
-                        out_selected = out.gather(1, model_answer_position.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, out.size(-1)))
+        if run_answer_decode:
+            i = num_latent - 1  # preserves the `latent{i}` print label
+            # Decode the final answer in natural language
+            embds = self.get_embd(self.codi, self.model_name)(decoder_input_ids)
 
-                        distill_loss_tmp = self.distill_loss_fct(out_selected, ref_selected.detach())
-                        
-                        if self.distill_loss_div_std:
-                            if self.distill_loss_type == 'l2':
-                                distill_loss_tmp /= ref_selected.std()
-                            distill_loss_tmp /= ref_selected.std()
-                        distill_loss += distill_loss_tmp
-                    
-                    distill_loss /= len(outputs.hidden_states)
-                    
-                    if self.print_loss:
-                        print(f'latent{i}: distill_loss={distill_loss}')
+            if dynamic_mask is not None: # Prevent attending the paddings
+                decoder_mask = torch.ones((embds.size(0), embds.size(1)), dtype=torch.bool).to(dynamic_mask)
+                dynamic_mask = torch.cat((encoder_attention_mask, dynamic_mask, decoder_mask), dim=1)
+                dynamic_mask = dynamic_mask.bool()
+            # Student task's output
+            outputs = self.codi(inputs_embeds=embds, use_cache=True, output_hidden_states=True, past_key_values=past_key_values, attention_mask=dynamic_mask)
+            # Teacher task's output
+            ref_outputs = ref_outputs_list[0]
 
-                    distill_loss_total += distill_loss
+            distill_loss = 0
+            # Calculate distillation loss between the teacher's logits and the student's logits for every layer
+            for j, (out, ref_out) in enumerate(zip(outputs.hidden_states, ref_outputs.hidden_states)):
+                ref_selected = ref_out.gather(1, ref_answer_position.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, ref_out.size(-1)))
+                out_selected = out.gather(1, model_answer_position.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, out.size(-1)))
 
-                    # Calculate the CE loss for the student task
-                    if i == num_latent - 1:
-                        logits = outputs.logits
-                        effective_logits = logits[:, :-1, :]
-                        effective_logits = effective_logits.reshape(-1, logits.size(-1))
-                        target_ids = labels[:, 1:].reshape(-1)                        
-                        ce_loss = self.loss_fct(effective_logits, target_ids)
-                        ce_loss_total += ce_loss
+                distill_loss_tmp = self.distill_loss_fct(out_selected, ref_selected.detach())
+
+                if self.distill_loss_div_std:
+                    if self.distill_loss_type == 'l2':
+                        distill_loss_tmp /= ref_selected.std()
+                    distill_loss_tmp /= ref_selected.std()
+                distill_loss += distill_loss_tmp
+
+            distill_loss /= len(outputs.hidden_states)
+
+            if self.print_loss:
+                print(f'latent{i}: distill_loss={distill_loss}')
+
+            distill_loss_total += distill_loss
+
+            # Calculate the CE loss for the student task
+            logits = outputs.logits
+            effective_logits = logits[:, :-1, :]
+            effective_logits = effective_logits.reshape(-1, logits.size(-1))
+            target_ids = labels[:, 1:].reshape(-1)
+            ce_loss = self.loss_fct(effective_logits, target_ids)
+            ce_loss_total += ce_loss
 
         # Calculate the CE loss for the teacher task
         ref_ce_loss = 0
@@ -388,7 +431,7 @@ class CODI(torch.nn.Module):
         effective_ref_logits = effective_ref_logits.reshape(-1, ref_logits.size(-1))
         ref_target_ids = ref_labels[:, 1:].reshape(-1)
         ref_ce_loss = self.loss_fct(effective_ref_logits, ref_target_ids)
-        ref_ce_loss *= self.ref_loss_factor 
+        ref_ce_loss *= self.ref_loss_factor
 
         # Weigh the distillation loss
         distill_loss *= self.distill_loss_factor
@@ -398,7 +441,7 @@ class CODI(torch.nn.Module):
             print(f'loss={ce_loss+distill_loss}, ce_loss={ce_loss}, distill_loss={distill_loss}, ce_loss_total={ce_loss_total}, distill_loss_total={distill_loss_total}, ref_ce_loss={ref_ce_loss}')
 
         loss = ce_loss_total + distill_loss_total + ref_ce_loss
-        
+
         if ce_loss_total != 0:
             ce_loss_total = ce_loss_total.detach().item()
         if distill_loss_total != 0:
@@ -407,4 +450,3 @@ class CODI(torch.nn.Module):
             ref_ce_loss = ref_ce_loss.detach().item()
 
         return {"loss": loss, "logits": logits, "ce_loss": ce_loss_total, "distill_loss": distill_loss_total, "ref_ce_loss": ref_ce_loss}
-

@@ -30,6 +30,7 @@ python train.py \
 	--do_train \
 	--report_to tensorboard \
     --num_latent 6 \
+    --depth_recurrent True \
     --logging_strategy "steps" \
 	--use_prj True \
 	--prj_dim 768 \

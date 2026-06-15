@@ -66,7 +66,7 @@ def evaluation(model_args, data_args, training_args):
         )
     else:
         raise NotImplementedError
-    
+
     model = CODI(model_args, training_args, lora_config)
     #if "llama" in model_args.model_name_or_path:
     #    model.codi.resize_token_embeddings(128261)
@@ -74,13 +74,13 @@ def evaluation(model_args, data_args, training_args):
         state_dict = load_file(os.path.join(model_args.ckpt_dir, "model.safetensors"))
     except Exception:
         state_dict = torch.load(os.path.join(model_args.ckpt_dir, "pytorch_model.bin"))
-    
+
     # new_state_dict = { k.replace("coconut", "codi"): v for k, v in state_dict.items() }
     # torch.save(new_state_dict, "/scratch/prj/inf_multimodal_qa/scratch_tmp/transfer/pytorch_model.bin")
     model.load_state_dict(state_dict, strict=False)
     model.codi.tie_weights()
-    
-    tokenizer_path = model_args.model_name_or_path 
+
+    tokenizer_path = model_args.model_name_or_path
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         tokenizer_path,
         token=model_args.token,
@@ -163,7 +163,7 @@ def evaluation(model_args, data_args, training_args):
     eval_step = math.ceil(len(question)/data_args.batch_size)
     logging.warning(f"Total example: {len(question)} | eval batch size: {data_args.batch_size}"
                     f"eval steps: {eval_step}")
-    
+
     question_data = []
     for i in range(eval_step):
         if i < eval_step - 1:
@@ -178,7 +178,7 @@ def evaluation(model_args, data_args, training_args):
                 return_tensors="pt",
                 padding="longest",
             )
-        
+
         if training_args.remove_eos:
             bot_tensor = torch.tensor([model.bot_id], dtype=torch.long).expand(batch["input_ids"].size(0), 1)
         else:
@@ -207,7 +207,7 @@ def evaluation(model_args, data_args, training_args):
     len_cot = []
     model.eval()
     attn_to_latent_list = []
-    
+
     for step, batch in enumerate(question_data):
         batch_size = batch["input_ids"].size(0)
         with torch.no_grad():
@@ -219,26 +219,40 @@ def evaluation(model_args, data_args, training_args):
 
             if training_args.use_prj:
                 latent_embd = model.prj(latent_embd)
-            
+
             inf_latent_iterations = training_args.inf_latent_iterations
-            for i in range(inf_latent_iterations):
-                # decode the latent embeddings
-                outputs = model.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
-                past_key_values = outputs.past_key_values
-                latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
-                
-                if training_args.use_prj:
-                    latent_embd = model.prj(latent_embd)
+            if training_args.depth_recurrent:
+                # Depth-recurrent thinking stage: looped middle-block recurrence over
+                # a single thought slot (same backend as training). Produces a cache of
+                # length q_len + 1 that the unchanged answer generation consumes.
+                past_key_values = model.depth_backend().think(
+                    seed=latent_embd,
+                    question_past=past_key_values,
+                    encoder_attention_mask=batch["attention_mask"],
+                    num_iterations=inf_latent_iterations,
+                    num_prelude=model.num_prelude,
+                    num_coda=model.num_coda,
+                    core_bptt_window=model.core_bptt_window,
+                )
+            else:
+                for i in range(inf_latent_iterations):
+                    # decode the latent embeddings
+                    outputs = model.codi(inputs_embeds=latent_embd, use_cache=True, output_hidden_states=True, past_key_values=past_key_values)
+                    past_key_values = outputs.past_key_values
+                    latent_embd = outputs.hidden_states[-1][:, -1, :].unsqueeze(1)
+
+                    if training_args.use_prj:
+                        latent_embd = model.prj(latent_embd)
 
             if training_args.remove_eos:
                 eot_emb = model.get_embd(model.codi, model.model_name)(torch.tensor([model.eot_id], dtype=torch.long, device='cuda')).unsqueeze(0).to(device)
             else:
                 eot_emb = model.get_embd(model.codi, model.model_name)(torch.tensor([model.eot_id, tokenizer.eos_token_id], dtype=torch.long, device='cuda')).unsqueeze(0).to(device)
-            
+
             eot_emb = eot_emb.expand(batch["input_ids"].size(0), -1, -1)
 
             output = eot_emb
-            
+
             seq_len = 0
             finished = torch.zeros(batch_size, dtype=torch.bool, device="cuda")  # Track EOS for each sequence
             pred_tokens = [[] for _ in range(batch_size)]
@@ -277,7 +291,7 @@ def evaluation(model_args, data_args, training_args):
 
                         for b in range(logits.size(0)):
                             logits[b, sorted_indices[b, sorted_indices_to_remove[b]]] = -float("inf")
-                    
+
                     probs = F.softmax(logits, dim=-1)
                     next_token_ids = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
@@ -298,7 +312,7 @@ def evaluation(model_args, data_args, training_args):
             for mini_step, pred_token in enumerate(pred_tokens):
                 len_cot.append(len(pred_token))
                 decoded_pred = tokenizer.decode(pred_token, skip_special_tokens=True)
-                # Extract the numbers in sentences 
+                # Extract the numbers in sentences
                 if do_print:
                     print(f"Question {step*data_args.batch_size+mini_step} Starts...")
                     print(f"Q: {question[step*data_args.batch_size+mini_step]}")
@@ -307,7 +321,7 @@ def evaluation(model_args, data_args, training_args):
                     print(f"Prediction={extract_answer_number(decoded_pred)}; Groundtruth={answer[step*data_args.batch_size+mini_step]}")
                     print("")
                 ans_pred_list.append(extract_answer_number(decoded_pred))
-      
+
     accuracy = compute_accuracy(answer, ans_pred_list)
 
     print(f"adapter: {model_args.adapter_name_or_path} | GSM8K test accuracy: {100*accuracy:.2f}% | ")
@@ -322,7 +336,7 @@ def extract_answer_number(sentence: str) -> float:
         if "commonsense" in data_args.data_name:
             pred = sentence.split("The answer is:")[-1].strip()
             if pred[0] not in "ABCDE":
-                return "C" 
+                return "C"
             return pred[0]
         elif "strategy" in data_args.data_name or "prontoqa" in data_args.data_name.lower():
             if "True" in sentence:
