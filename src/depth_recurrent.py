@@ -56,7 +56,8 @@ class DepthRecurrentBackend:
                 exact match to a plain forward only for the K=1, 1/1 anchor).
 
         Returns:
-            final_past (legacy tuple of length `q_len + 1`), or
+            final_past (a legacy tuple with one (key, value) pair per layer; each
+            tensor has sequence length q_len + 1), or
             (final_past, hidden_states, slot_kv) when `return_hidden=True`.
         """
         raise NotImplementedError
@@ -118,6 +119,11 @@ class GPT2DepthBackend(DepthRecurrentBackend):
         return_hidden=False,
     ):
         L = self.num_layers
+        if num_iterations < 1:
+            raise ValueError(
+                f"depth_recurrent requires num_iterations (K) >= 1; got {num_iterations}. "
+                f"(K is num_latent in training / inf_latent_iterations in inference.)"
+            )
         if num_prelude < 1 or num_coda < 1 or num_prelude + num_coda >= L:
             raise ValueError(
                 f"num_prelude/num_coda must be >=1 and leave a non-empty core "
@@ -139,7 +145,10 @@ class GPT2DepthBackend(DepthRecurrentBackend):
         cache_position = torch.tensor([q_len], device=seed.device)
 
         slot_kv = [None] * L
-        hidden_states = [x]  # hidden_states[0] == input to block 0
+        # hidden_states is purely diagnostic (only used when return_hidden=True): the
+        # answer cache is assembled from slot_kv, not from these. Skip the bookkeeping
+        # -- including the coda ln_f -- on the normal training/inference path.
+        hidden_states = [x] if return_hidden else None  # hidden_states[0] == input to block 0
 
         prelude_idx = list(range(0, num_prelude))
         core_idx = list(range(num_prelude, L - num_coda))
@@ -150,7 +159,8 @@ class GPT2DepthBackend(DepthRecurrentBackend):
             x, slot_kv[j] = self._run_block(
                 tr.h[j], x, question_past[j][0], question_past[j][1], j, attn_mask, cache_position
             )
-            hidden_states.append(x)
+            if return_hidden:
+                hidden_states.append(x)
 
         # --- Recurrent core: looped K times, weight-tied. Recurrent state is x. ---
         for k in range(num_iterations):
@@ -160,18 +170,20 @@ class GPT2DepthBackend(DepthRecurrentBackend):
                 )
                 if k == num_iterations - 1:  # expose only the last iteration's KV
                     slot_kv[j] = kv
-                    hidden_states.append(x)
+                    if return_hidden:
+                        hidden_states.append(x)
             if core_bptt_window > 0 and k < num_iterations - core_bptt_window:
                 x = x.detach()
 
-        # --- Coda: run once. Only ln_f of the final block output enters hidden_states. ---
+        # --- Coda: run once. (When return_hidden, ln_f of the final output is appended.) ---
         for n, j in enumerate(coda_idx):
             x, slot_kv[j] = self._run_block(
                 tr.h[j], x, question_past[j][0], question_past[j][1], j, attn_mask, cache_position
             )
-            if n < len(coda_idx) - 1:
+            if return_hidden and n < len(coda_idx) - 1:
                 hidden_states.append(x)
-        hidden_states.append(tr.ln_f(x))
+        if return_hidden:
+            hidden_states.append(tr.ln_f(x))
 
         # Assemble the final cache: question KV + the single thought slot KV.
         final_past = tuple(

@@ -94,7 +94,7 @@ class TrainingArguments(transformers.TrainingArguments):
         metadata={"help": "Experiment name"},
     )
     icot_train_path: str = field(default="/users/k24020023/efficient_cot/icae/code/coconut/icot_gsm8k/train.txt", metadata={"help":"The training data path"})
-    num_latent: int = field(default=5, metadata={"help": "The number of latent for training or inference."})
+    num_latent: int = field(default=5, metadata={"help": "The number of latent for training or inference. In depth_recurrent mode this is reused as the recurrence count K (number of core-loop iterations)."})
     use_lora: bool = field(default=True, metadata={"help": "Use lora or not."})
     greedy: bool = field(default=False, metadata={"help": "Greedy decoding during inference."})
     exp_mode: bool = field(default=False, metadata={"help": "Use partial number of data. for debugging."})
@@ -232,6 +232,26 @@ class CODI(torch.nn.Module):
         self.core_bptt_window = training_args.core_bptt_window
         self._depth_backend = None  # built lazily on first use
 
+        # Fail fast on unsupported / invalid depth-recurrent configs at construction
+        # time, instead of crashing lazily on the first forward.
+        if self.depth_recurrent:
+            if "gpt2" not in self.model_name.lower():
+                raise NotImplementedError(
+                    f"depth_recurrent is only implemented for GPT-2 (phase 1); got '{self.model_name}'."
+                )
+            if self.num_latent < 1:
+                raise ValueError(
+                    f"depth_recurrent requires num_latent >= 1 (it is the recurrence count K); "
+                    f"got num_latent={self.num_latent}."
+                )
+            num_blocks = self.get_base_model().config.num_hidden_layers
+            if self.num_prelude < 1 or self.num_coda < 1 or self.num_prelude + self.num_coda >= num_blocks:
+                raise ValueError(
+                    f"depth_recurrent needs num_prelude >= 1, num_coda >= 1, and a non-empty core "
+                    f"(num_prelude + num_coda < num_layers={num_blocks}); "
+                    f"got num_prelude={self.num_prelude}, num_coda={self.num_coda}."
+                )
+
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
             self.tokenizer.pad_token_id = self.pad_token_id
@@ -365,7 +385,7 @@ class CODI(torch.nn.Module):
                 seed=latent_embd,
                 question_past=past_key_values,
                 encoder_attention_mask=encoder_attention_mask,
-                num_iterations=num_latent,
+                num_iterations=num_latent,  # K = number of core-loop iterations (reused num_latent)
                 num_prelude=self.num_prelude,
                 num_coda=self.num_coda,
                 core_bptt_window=self.core_bptt_window,

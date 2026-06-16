@@ -77,6 +77,12 @@ You can change the testing script's data_name to "commonsense" for evaluation.
 
 * `inf_latent_iterations`: The number of latent thoughts used for inference.
 
+* `depth_recurrent`: Use the depth-recurrent (looped middle-block) thinking stage instead of the autoregressive latent loop (GPT-2 only). When enabled, `num_latent` (training) / `inf_latent_iterations` (inference) is reused as the number of recurrences K, and no continuous latent tokens are generated.
+
+* `num_prelude` / `num_coda`: For `depth_recurrent`, the number of leading / trailing transformer blocks run once (default 1 each); the blocks in between form the recurrent core looped K times.
+
+* `core_bptt_window`: For `depth_recurrent`, if >0 backprop only through the last N core iterations (truncated BPTT); -1 means full BPTT.
+
 * `include_last_cot`: Include the last CoT step in the training data.
 
 * `fix_attn_mask`: Flag to fix a known attention mask bug (leave as False by default).
